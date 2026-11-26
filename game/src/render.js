@@ -3,10 +3,10 @@
 // mountains, a lit runway, pine trees, a harbour town, drifting clouds and
 // glowing golden rings. Plus the chase and cockpit cameras and the DOM HUD.
 import * as THREE from 'three';
-import { heightAt, treeSpots, townSpots, RUNWAY } from './world.js';
+import { heightAt, treeSpots, townSpots, RUNWAY, WORLD_SEED } from './world.js';
 import { buildAircraft } from './aircraft.js';
 import { buildDashboard } from './cockpit.js';
-import { mulberry32, clamp, lerp } from './random.js';
+import { mulberry32, clamp, lerp, makeNoise2D } from './random.js';
 
 const FOG_COLOR = 0xf2a35e;
 
@@ -15,11 +15,13 @@ function makeSkyTexture() {
   c.width = 16; c.height = 512;
   const g = c.getContext('2d');
   const grad = g.createLinearGradient(0, 0, 0, 512);
-  grad.addColorStop(0, '#274a7d');
-  grad.addColorStop(0.42, '#7d7fb0');
-  grad.addColorStop(0.58, '#ff9e5e');
+  grad.addColorStop(0, '#1b3768'); // deep indigo zenith
+  grad.addColorStop(0.28, '#5a5f9e');
+  grad.addColorStop(0.46, '#a86a9d'); // magenta dusk band
+  grad.addColorStop(0.58, '#ff8a5e');
   grad.addColorStop(0.72, '#ffc27a');
-  grad.addColorStop(1, '#ffe3b0');
+  grad.addColorStop(0.86, '#ffe0a8');
+  grad.addColorStop(1, '#fff0c8');
   g.fillStyle = grad; g.fillRect(0, 0, 16, 512);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
@@ -77,7 +79,7 @@ export function createRenderer(canvas) {
   renderer.toneMappingExposure = 1.05;
 
   const scene = new THREE.Scene();
-  scene.fog = new THREE.Fog(FOG_COLOR, 900, 5200);
+  scene.fog = new THREE.Fog(FOG_COLOR, 1300, 6500);
 
   // Sky dome: a huge sphere with the gradient painted on its inside.
   const sky = new THREE.Mesh(
@@ -91,9 +93,17 @@ export function createRenderer(canvas) {
   const sun = new THREE.Sprite(new THREE.SpriteMaterial({
     map: makeSunTexture(), transparent: true, fog: false, depthWrite: false,
   }));
-  sun.scale.set(1400, 1400, 1);
+  sun.scale.set(1900, 1900, 1);
   sun.position.copy(sunDir).multiplyScalar(8200);
   scene.add(sun);
+
+  // Crisp sun disc inside the glow, so the sun reads as a real low sun.
+  const sunCore = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: makeSunTexture(), transparent: true, fog: false, depthWrite: false, opacity: 0.95,
+  }));
+  sunCore.scale.set(520, 520, 1);
+  sunCore.position.copy(sunDir).multiplyScalar(8100);
+  scene.add(sunCore);
 
   // Light: warm low sun + cool sky fill.
   const sunLight = new THREE.DirectionalLight(0xffb36b, 2.4);
@@ -101,13 +111,43 @@ export function createRenderer(canvas) {
   scene.add(sunLight);
   scene.add(new THREE.HemisphereLight(0xffd9a0, 0x2a4a5a, 0.85));
 
-  // Sea: a wide shining plane at y = 0.
+  // Sea: a wide shining plane at y = 0 — warmer tropical teal so it reads
+  // as sunlit water, not a dark void, from the chase view. The low sun
+  // barely lights a flat plane, so a small emissive lift keeps the base
+  // colour readable instead of near-black.
   const sea = new THREE.Mesh(
     new THREE.PlaneGeometry(14000, 14000),
-    new THREE.MeshPhongMaterial({ color: 0x1d6a8a, shininess: 140, specular: 0xffc27a }),
+    new THREE.MeshPhongMaterial({
+      color: 0x2e8cae, shininess: 200, specular: 0xffd9a0, emissive: 0x0e3d52,
+    }),
   );
   sea.rotation.x = -Math.PI / 2;
   scene.add(sea);
+
+  // Sun glitter on the water: small bright discs scattered over the lagoon,
+  // seeded so the pattern is identical every run.
+  const glitterGeo = new THREE.CircleGeometry(1, 6);
+  const glitterMat = new THREE.MeshBasicMaterial({
+    color: 0xffd9a0, transparent: true, opacity: 0.45,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const glitterRand = mulberry32(0x61a7);
+  const glitter = new THREE.InstancedMesh(glitterGeo, glitterMat, 500);
+  {
+    const m = new THREE.Matrix4();
+    const q0 = new THREE.Quaternion();
+    const e0 = new THREE.Euler(-Math.PI / 2, 0, 0);
+    for (let i = 0; i < 500; i += 1) {
+      const gx = (glitterRand() * 2 - 1) * 1600;
+      const gz = (glitterRand() * 2 - 1) * 1600;
+      const gs = 2 + glitterRand() * 4;
+      e0.set(-Math.PI / 2, 0, glitterRand() * Math.PI * 2);
+      q0.setFromEuler(e0);
+      m.compose(new THREE.Vector3(gx, 0.4, gz), q0, new THREE.Vector3(gs, gs, 1));
+      glitter.setMatrixAt(i, m);
+    }
+  }
+  scene.add(glitter);
 
   // Terrain: 200x200 heightfield with vertex colours.
   const terrainGeo = new THREE.PlaneGeometry(5200, 5200, 200, 200);
@@ -115,12 +155,21 @@ export function createRenderer(canvas) {
   const pos = terrainGeo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
   const col = new THREE.Color();
+  const patchCol = new THREE.Color(0xc9b26a); // dry grass clearing
+  const colorNoise = makeNoise2D(WORLD_SEED ^ 0xc010);
   for (let i = 0; i < pos.count; i += 1) {
     const x = pos.getX(i), z = pos.getZ(i);
     const h = heightAt(x, z);
     pos.setY(i, h);
     const slope = Math.abs(heightAt(x + 8, z) - h) / 8 + Math.abs(heightAt(x, z + 8) - h) / 8;
     col.copy(terrainColor(h, slope));
+    // Patchiness: dark forest clumps and dry-grass clearings so the ground
+    // does not read as flat colour. Purely visual — heights are untouched.
+    if (h > 3.5 && h < 90) {
+      const p = colorNoise.fbm(x * 0.004 + 31.7, z * 0.004 + 17.3, 2);
+      if (p > 0.22) col.multiplyScalar(0.62); // forest shadow clump
+      else if (p < -0.28) col.lerp(patchCol, 0.55); // dry clearing
+    }
     // Slight variation so the ground does not read as flat colour.
     const v = 0.94 + 0.06 * Math.sin(x * 0.021 + z * 0.017);
     colors[i * 3] = col.r * v; colors[i * 3 + 1] = col.g * v; colors[i * 3 + 2] = col.b * v;
@@ -187,14 +236,17 @@ export function createRenderer(canvas) {
   runwayGroup.add(hangarRoof);
   scene.add(runwayGroup);
 
-  // Trees: instanced pines scattered on the islands.
-  const treeSpotsList = treeSpots(320);
+  // Trees: instanced pines scattered on the islands — denser now, with three
+  // crown greens so the forest reads as varied, not one flat colour.
+  const treeSpotsList = treeSpots(650);
   const trunkGeo = new THREE.CylinderGeometry(0.5, 0.8, 4, 6);
   const crownGeo = new THREE.ConeGeometry(3.2, 11, 8);
   const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6a4a2f });
-  const crownMat = new THREE.MeshLambertMaterial({ color: 0x2f6b2a });
+  const crownMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, treeSpotsList.length);
   const crowns = new THREE.InstancedMesh(crownGeo, crownMat, treeSpotsList.length);
+  const crownGreens = [new THREE.Color(0x2f6b2a), new THREE.Color(0x3a7d33), new THREE.Color(0x256024)];
+  const crownRand = mulberry32(WORLD_SEED ^ 0x7e55);
   const m4 = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const eu = new THREE.Euler();
@@ -204,8 +256,72 @@ export function createRenderer(canvas) {
     trunks.setMatrixAt(i, m4);
     m4.compose(new THREE.Vector3(t.x, t.y + (4 + 5.5) * t.s, t.z), q, new THREE.Vector3(t.s, t.s, t.s));
     crowns.setMatrixAt(i, m4);
+    crowns.setColorAt(i, crownGreens[Math.floor(crownRand() * crownGreens.length)]);
   });
+  if (crowns.instanceColor) crowns.instanceColor.needsUpdate = true;
   scene.add(trunks, crowns);
+
+  // Palms on the beaches: taller thin trunks with wide flat crowns.
+  const palmRand = mulberry32(WORLD_SEED ^ 0x9a1);
+  const palmSpots = [];
+  {
+    let guard = 0;
+    while (palmSpots.length < 90 && guard < 4000) {
+      guard += 1;
+      const x = (palmRand() * 2 - 1) * 2200;
+      const z = (palmRand() * 2 - 1) * 2200;
+      const h = heightAt(x, z);
+      if (h < 3.5 || h > 10) continue;
+      if (Math.abs(x - RUNWAY.x) < RUNWAY.length && Math.abs(z - RUNWAY.z) < 140) continue;
+      palmSpots.push({ x, z, y: h, s: 0.8 + palmRand() * 0.6, rot: palmRand() * Math.PI * 2 });
+    }
+  }
+  const palmTrunkGeo = new THREE.CylinderGeometry(0.28, 0.45, 9, 6);
+  const palmCrownGeo = new THREE.SphereGeometry(4.4, 8, 6);
+  const palmTrunkMat = new THREE.MeshLambertMaterial({ color: 0x8a6a45 });
+  const palmCrownMat = new THREE.MeshLambertMaterial({ color: 0x4f9440 });
+  const palmTrunks = new THREE.InstancedMesh(palmTrunkGeo, palmTrunkMat, palmSpots.length);
+  const palmCrowns = new THREE.InstancedMesh(palmCrownGeo, palmCrownMat, palmSpots.length);
+  palmSpots.forEach((t, i) => {
+    eu.set(0, t.rot, 0); q.setFromEuler(eu);
+    m4.compose(new THREE.Vector3(t.x, t.y + 4.5 * t.s, t.z), q, new THREE.Vector3(t.s, t.s, t.s));
+    palmTrunks.setMatrixAt(i, m4);
+    m4.compose(new THREE.Vector3(t.x, t.y + 9.5 * t.s, t.z), q, new THREE.Vector3(t.s, 0.45 * t.s, t.s));
+    palmCrowns.setMatrixAt(i, m4);
+  });
+  scene.add(palmTrunks, palmCrowns);
+
+  // Runway-verge trees: pines on the lower slopes flanking the strip, so the
+  // hills in the cockpit/takeoff frames are not bare. Visual only — trees
+  // have no collision and the strip itself stays clear.
+  const vergeRand = mulberry32(WORLD_SEED ^ 0xbe96);
+  const vergeSpots = [];
+  {
+    let guard = 0;
+    while (vergeSpots.length < 220 && guard < 6000) {
+      guard += 1;
+      const x = RUNWAY.x + (vergeRand() * 2 - 1) * (RUNWAY.length / 2 + 60);
+      const side = vergeRand() < 0.5 ? -1 : 1;
+      const z = RUNWAY.z + side * (48 + vergeRand() * 172);
+      const h = heightAt(x, z);
+      if (h < 6 || h > 75) continue;
+      const slope = Math.abs(heightAt(x + 6, z) - h) + Math.abs(heightAt(x, z + 6) - h);
+      if (slope > 2.6) continue;
+      vergeSpots.push({ x, z, y: h, s: 0.8 + vergeRand() * 0.9, rot: vergeRand() * Math.PI * 2 });
+    }
+  }
+  const vergeTrunks = new THREE.InstancedMesh(trunkGeo, trunkMat, vergeSpots.length);
+  const vergeCrowns = new THREE.InstancedMesh(crownGeo, crownMat, vergeSpots.length);
+  vergeSpots.forEach((t, i) => {
+    eu.set(0, t.rot, 0); q.setFromEuler(eu);
+    m4.compose(new THREE.Vector3(t.x, t.y + 2 * t.s, t.z), q, new THREE.Vector3(t.s, t.s, t.s));
+    vergeTrunks.setMatrixAt(i, m4);
+    m4.compose(new THREE.Vector3(t.x, t.y + (4 + 5.5) * t.s, t.z), q, new THREE.Vector3(t.s, t.s, t.s));
+    vergeCrowns.setMatrixAt(i, m4);
+    vergeCrowns.setColorAt(i, crownGreens[Math.floor(crownRand() * crownGreens.length)]);
+  });
+  if (vergeCrowns.instanceColor) vergeCrowns.instanceColor.needsUpdate = true;
+  scene.add(vergeTrunks, vergeCrowns);
 
   // Harbour town: small coloured houses with pyramid roofs.
   const townGroup = new THREE.Group();
@@ -228,18 +344,196 @@ export function createRenderer(canvas) {
   }
   scene.add(townGroup);
 
-  // Clouds: soft billboards drifting slowly.
+  // Volcano island: a dark cone on the eastern island's peak (1250, -850),
+  // dead ahead in the chase shot, with a lava glow and a rising smoke plume.
+  // Visual only — the terrain height function is untouched.
+  const VOLCANO = { x: 1250, z: -850, apexY: 78 };
+  const volcanoGroup = new THREE.Group();
+  const volcanoCone = new THREE.Mesh(
+    new THREE.ConeGeometry(150, 58, 24, 1),
+    new THREE.MeshLambertMaterial({ color: 0x4a382e }),
+  );
+  volcanoCone.position.set(VOLCANO.x, 20 + 29, VOLCANO.z);
+  volcanoGroup.add(volcanoCone);
+  const crater = new THREE.Mesh(
+    new THREE.CircleGeometry(16, 16),
+    new THREE.MeshBasicMaterial({ color: 0x2a1a12 }),
+  );
+  crater.rotation.x = -Math.PI / 2;
+  crater.position.set(VOLCANO.x, VOLCANO.apexY - 0.5, VOLCANO.z);
+  volcanoGroup.add(crater);
+  const lavaGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: makeSunTexture(), transparent: true, opacity: 0.65,
+    color: 0xff6a22, depthWrite: false,
+  }));
+  lavaGlow.scale.set(70, 70, 1);
+  lavaGlow.position.set(VOLCANO.x, VOLCANO.apexY + 2, VOLCANO.z);
+  volcanoGroup.add(lavaGlow);
+  scene.add(volcanoGroup);
+  // Smoke puffs: positions are a pure function of game time, so the frozen
+  // screenshot frame is deterministic and the plume still rises in play.
+  const smokePuffs = [];
+  const smokeTex = makeCloudTexture();
+  for (let i = 0; i < 7; i += 1) {
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: smokeTex, transparent: true, opacity: 0.5, depthWrite: false,
+      color: 0x8f8f96,
+    }));
+    sp.position.set(VOLCANO.x, VOLCANO.apexY + 10 + i * 8, VOLCANO.z);
+    sp.scale.set(30, 18, 1);
+    smokePuffs.push(sp);
+    scene.add(sp);
+  }
+
+  // Boats on the lagoon: hull, mast and a triangular sail, moored in the
+  // shot sight-lines (chase course, ring lagoon, east of the runway island).
+  function buildBoat(x, z, rot) {
+    const boat = new THREE.Group();
+    const hull = new THREE.Mesh(
+      new THREE.BoxGeometry(9, 2, 3.2),
+      new THREE.MeshLambertMaterial({ color: 0xf2ede2 }),
+    );
+    hull.position.y = 0.8;
+    boat.add(hull);
+    const stripe = new THREE.Mesh(
+      new THREE.BoxGeometry(9.1, 0.5, 3.3),
+      new THREE.MeshLambertMaterial({ color: 0xc23b2e }),
+    );
+    stripe.position.y = 1.6;
+    boat.add(stripe);
+    const mast = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.16, 0.16, 9, 6),
+      new THREE.MeshLambertMaterial({ color: 0x6a4a2f }),
+    );
+    mast.position.y = 6;
+    boat.add(mast);
+    const sailShape = new THREE.Shape();
+    sailShape.moveTo(0, 0); sailShape.lineTo(0, 7.5); sailShape.lineTo(4.6, 0.6); sailShape.lineTo(0, 0);
+    const sail = new THREE.Mesh(
+      new THREE.ShapeGeometry(sailShape),
+      new THREE.MeshLambertMaterial({ color: 0xfff6e0, side: THREE.DoubleSide }),
+    );
+    sail.position.set(0.2, 2.2, 0);
+    boat.add(sail);
+    boat.position.set(x, 0, z);
+    boat.rotation.y = rot;
+    return boat;
+  }
+  scene.add(buildBoat(800, -700, 0.6));
+  scene.add(buildBoat(1000, -1100, 2.4));
+  scene.add(buildBoat(0, -900, 1.2));
+  scene.add(buildBoat(600, 400, 2.9));
+
+  // Lighthouse on the volcano island's north shore, in the chase frame.
+  const LIGHTHOUSE = { x: 1150, z: -580 };
+  const lighthouseBaseY = heightAt(LIGHTHOUSE.x, LIGHTHOUSE.z);
+  const lighthouse = new THREE.Group();
+  const tower = new THREE.Mesh(
+    new THREE.CylinderGeometry(3.2, 4.4, 24, 12),
+    new THREE.MeshLambertMaterial({ color: 0xf2ede2 }),
+  );
+  tower.position.y = 12;
+  lighthouse.add(tower);
+  const band = new THREE.Mesh(
+    new THREE.CylinderGeometry(3.9, 4.1, 3.6, 12),
+    new THREE.MeshLambertMaterial({ color: 0xc23b2e }),
+  );
+  band.position.y = 15;
+  lighthouse.add(band);
+  const lampRoom = new THREE.Mesh(
+    new THREE.CylinderGeometry(2.4, 2.4, 3.6, 10),
+    new THREE.MeshLambertMaterial({ color: 0x222831 }),
+  );
+  lampRoom.position.y = 25.5;
+  lighthouse.add(lampRoom);
+  const lamp = new THREE.Mesh(
+    new THREE.SphereGeometry(1.4, 10, 8),
+    new THREE.MeshBasicMaterial({ color: 0xffe9a8 }),
+  );
+  lamp.position.y = 25.5;
+  lighthouse.add(lamp);
+  const lampRoof = new THREE.Mesh(
+    new THREE.ConeGeometry(3, 2.6, 10),
+    new THREE.MeshLambertMaterial({ color: 0x8a2f24 }),
+  );
+  lampRoof.position.y = 28.5;
+  lighthouse.add(lampRoof);
+  const lampGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: makeSunTexture(), transparent: true, opacity: 0.55, depthWrite: false,
+  }));
+  lampGlow.scale.set(46, 46, 1);
+  lampGlow.position.y = 25.5;
+  lighthouse.add(lampGlow);
+  lighthouse.position.set(LIGHTHOUSE.x, lighthouseBaseY, LIGHTHOUSE.z);
+  scene.add(lighthouse);
+
+  // Seaplane dock on the volcano island's west shore, in the chase frame:
+  // wooden planks on posts, with a small floatplane moored alongside.
+  const dock = new THREE.Group();
+  const plankMat = new THREE.MeshLambertMaterial({ color: 0x8a6a45 });
+  for (let i = 0; i < 5; i += 1) {
+    const plank = new THREE.Mesh(new THREE.BoxGeometry(14, 0.3, 1.3), plankMat);
+    plank.position.set(0, 1.1, (i - 2) * 1.4);
+    dock.add(plank);
+  }
+  const postMat = new THREE.MeshLambertMaterial({ color: 0x5a4028 });
+  for (const px of [-6, 6]) {
+    for (const pz of [-2.8, 2.8]) {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 3, 6), postMat);
+      post.position.set(px, 0, pz);
+      dock.add(post);
+    }
+  }
+  dock.position.set(948, 0, -800);
+  scene.add(dock);
+  const floatplane = new THREE.Group();
+  const fpBody = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.1, 0.9, 7, 10),
+    new THREE.MeshLambertMaterial({ color: 0xf2ede2 }),
+  );
+  fpBody.rotation.z = Math.PI / 2;
+  fpBody.position.y = 2.2;
+  floatplane.add(fpBody);
+  const fpWing = new THREE.Mesh(
+    new THREE.BoxGeometry(2.2, 0.18, 9.5),
+    new THREE.MeshLambertMaterial({ color: 0xc23b2e }),
+  );
+  fpWing.position.y = 3.1;
+  floatplane.add(fpWing);
+  const fpTail = new THREE.Mesh(
+    new THREE.BoxGeometry(1.8, 0.16, 3.4),
+    new THREE.MeshLambertMaterial({ color: 0xc23b2e }),
+  );
+  fpTail.position.set(-3.4, 2.6, 0);
+  floatplane.add(fpTail);
+  for (const fz of [-1.4, 1.4]) {
+    const float = new THREE.Mesh(
+      new THREE.BoxGeometry(4.5, 0.6, 0.8),
+      new THREE.MeshLambertMaterial({ color: 0xd8d8d8 }),
+    );
+    float.position.set(0.4, 0.6, fz);
+    floatplane.add(float);
+  }
+  floatplane.position.set(930, 0, -792);
+  floatplane.rotation.y = 0.35;
+  scene.add(floatplane);
+
+  // Clouds: soft billboards drifting slowly — more of them, in two tints
+  // (cool white high up, warm gold near the sun) so the sky has depth.
   const cloudTex = makeCloudTexture();
   const cloudRand = mulberry32(99);
   const clouds = [];
-  for (let i = 0; i < 42; i += 1) {
+  const cloudTints = [0xffffff, 0xffe0c0, 0xffc9a0];
+  for (let i = 0; i < 64; i += 1) {
+    const tint = cloudTints[Math.floor(cloudRand() * cloudTints.length)];
     const s = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: cloudTex, transparent: true, opacity: 0.75 + cloudRand() * 0.2, depthWrite: false,
+      map: cloudTex, transparent: true, opacity: 0.6 + cloudRand() * 0.35,
+      depthWrite: false, color: tint,
     }));
     const a = cloudRand() * Math.PI * 2;
     const r = 400 + cloudRand() * 2200;
     s.position.set(Math.cos(a) * r, 200 + cloudRand() * 160, Math.sin(a) * r);
-    const sc = 180 + cloudRand() * 260;
+    const sc = 180 + cloudRand() * 320;
     s.scale.set(sc, sc * 0.45, 1);
     s.userData.drift = 1.5 + cloudRand() * 2;
     clouds.push(s);
@@ -461,6 +755,20 @@ export function createRenderer(canvas) {
     for (const c of clouds) {
       c.position.x += c.userData.drift * dt;
       if (c.position.x > 2600) c.position.x = -2600;
+    }
+    // Volcano smoke: each puff's place is a pure function of game time, so
+    // the frozen screenshot frame is deterministic and the plume still rises.
+    for (let i = 0; i < smokePuffs.length; i += 1) {
+      const cycle = (s.time * 3 + i * 9) % 55;
+      const sp = smokePuffs[i];
+      sp.position.set(
+        VOLCANO.x + Math.sin(i * 2.1) * 6 + cycle * 0.9,
+        VOLCANO.apexY + 6 + cycle,
+        VOLCANO.z + Math.cos(i * 1.7) * 6 - cycle * 0.4,
+      );
+      const sc = 26 + cycle * 0.9;
+      sp.scale.set(sc, sc * 0.6, 1);
+      sp.material.opacity = 0.55 * (1 - cycle / 70);
     }
     // Rings: the active one pulses gold, passed ones go dim.
     ringMeshes.forEach((mesh, i) => {
