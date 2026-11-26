@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Island Hopper — Golden Hour Flight</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1a2436;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif; }
+  #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #hud { position: fixed; inset: 0; pointer-events: none; color: #eaf6ff;
+    text-shadow: 0 1px 3px rgba(0,0,0,.8); user-select: none; }
+  .panel { position: absolute; background: rgba(8, 18, 30, .55); border: 1px solid rgba(140, 220, 255, .35);
+    border-radius: 10px; padding: 8px 12px; backdrop-filter: blur(2px); }
+  .panel .lbl { font-size: 10px; letter-spacing: .18em; color: #9fd8ff; opacity: .9; }
+  .panel .val { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; color: #fff; }
+  .panel .unit { font-size: 11px; color: #9fd8ff; margin-left: 2px; }
+  #p-left { top: 12px; left: 12px; display: flex; gap: 18px; }
+  #p-right { top: 12px; right: 12px; text-align: right; }
+  #p-right .val { font-size: 22px; }
+  #compass { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); }
+  #compass canvas { display: block; border-radius: 8px; }
+  #p-throttle { left: 12px; bottom: 12px; width: 170px; }
+  #throttle-bar { height: 10px; background: rgba(255,255,255,.15); border-radius: 5px; overflow: hidden; margin-top: 5px; }
+  #throttle-fill { height: 100%; width: 60%; background: linear-gradient(90deg, #37d67a, #ffd23e, #ff7a3c); }
+  #attitude { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); }
+  #attitude canvas { display: block; border-radius: 50%; border: 2px solid rgba(140,220,255,.5); background: rgba(8,18,30,.55); }
+  #banner { position: absolute; top: 22%; left: 50%; transform: translateX(-50%);
+    font-size: 30px; font-weight: 800; letter-spacing: .04em; color: #ffe9a8; text-align: center;
+    opacity: 0; transition: opacity .25s; white-space: nowrap; }
+  #banner small { display: block; font-size: 15px; font-weight: 600; color: #fff; letter-spacing: .12em; margin-top: 4px; }
+  #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(180deg, rgba(10,16,32,.25), rgba(10,16,32,.72)); pointer-events: auto; }
+  #overlay .card { text-align: center; color: #fff; max-width: 560px; padding: 28px 36px;
+    background: rgba(8, 18, 30, .62); border: 1px solid rgba(255, 190, 90, .45); border-radius: 16px; }
+  #overlay h1 { margin: 0 0 4px; font-size: 44px; letter-spacing: .06em; color: #ffd23e; }
+  #overlay h2 { margin: 0 0 14px; font-size: 15px; font-weight: 600; letter-spacing: .28em; color: #9fd8ff; }
+  #overlay p { margin: 8px 0; font-size: 15px; line-height: 1.55; color: #eaf6ff; }
+  #overlay .keys { font-size: 13px; color: #cfe9ff; line-height: 1.9; }
+  #overlay .keys b { color: #ffd23e; }
+  #overlay .go { margin-top: 14px; font-size: 17px; font-weight: 700; color: #0a1420;
+    background: #ffd23e; border-radius: 999px; padding: 10px 26px; display: inline-block; }
+  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .hidden { display: none !important; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+<canvas id="game" aria-label="Island Hopper: fly the seaplane through the golden rings"></canvas>
+<div id="hud">
+  <div id="p-left" class="panel">
+    <div><div class="lbl">ALTITUDE</div><div class="val"><span id="hud-alt">0</span><span class="unit">FT</span></div></div>
+    <div><div class="lbl">SPEED</div><div class="val"><span id="hud-spd">0</span><span class="unit">KT</span></div></div>
+    <div><div class="lbl">HEADING</div><div class="val"><span id="hud-hdg">090</span><span class="unit">&deg;</span></div></div>
+    <div><div class="lbl">VERT SPEED</div><div class="val" style="font-size:20px"><span id="hud-vsi">0</span><span class="unit">FT/MIN</span></div></div>
+  </div>
+  <div id="p-right" class="panel">
+    <div><div class="lbl">SCORE</div><div class="val" id="hud-score">0</div></div>
+    <div style="margin-top:4px"><span class="lbl">RINGS </span><span class="val" style="font-size:18px" id="hud-rings">0 / 8</span>
+    &nbsp;&nbsp;<span class="lbl">TIME </span><span class="val" style="font-size:18px" id="hud-time">2:30</span>
+    &nbsp;&nbsp;<span class="lbl">LIVES </span><span class="val" style="font-size:18px" id="hud-lives">3</span></div>
+  </div>
+  <div id="compass"><canvas id="compass-canvas" width="360" height="34"></canvas></div>
+  <div id="p-throttle" class="panel">
+    <div class="lbl">THROTTLE <span id="hud-thr-pct" style="color:#fff">60%</span></div>
+    <div id="throttle-bar"><div id="throttle-fill"></div></div>
+    <div class="lbl" style="margin-top:6px" id="hud-gear">GEAR DOWN &middot; FLAPS UP</div>
+  </div>
+  <div id="attitude"><canvas id="attitude-canvas" width="110" height="110"></canvas></div>
+  <div id="banner"></div>
+</div>
+<div id="overlay"><div class="card" id="overlay-card"></div></div>
+<p id="status" role="status" aria-live="polite"></p>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
